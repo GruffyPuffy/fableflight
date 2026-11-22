@@ -37,6 +37,10 @@ The default imagery zoom range is 8 through 14. Elevation and vector data are
 downloaded at zoom 14, matching the game's current data zoom. Use `--max-zoom`
 to request more imagery detail; larger ranges can be very large.
 
+Coverage adds a 10 km download buffer around the requested radius. Zoom 14
+elevation and vector grids also include a one-tile border on every side so
+runway leveling and neighbouring tile reads do not stop at the package edge.
+
 Downloaded content is resumable: rerunning `create` with the same output
 directory skips existing non-empty files.
 
@@ -46,6 +50,18 @@ directory skips existing non-empty files.
 cargo run --manifest-path tools/fablemap/Cargo.toml -- info maps/esgj
 cargo run --manifest-path tools/fablemap/Cargo.toml -- verify maps/esgj
 ```
+
+## Test a package in the game
+
+The runtime currently supports package loading for direct airport starts:
+
+```sh
+cargo run -- --map maps/mini-caucasus --airport UGKO --runway 07 --aircraft c172 --mute
+```
+
+Map mode disables network tile fetching and reads imagery, elevation and vector
+tiles directly from the package. Google imagery and photorealistic tiles are
+also disabled while `--map` is active.
 
 Rerunning `create` with the same output resumes existing files. The package
 manifest is marked incomplete after creation starts and is marked complete only

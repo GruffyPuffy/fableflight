@@ -187,6 +187,7 @@ impl<T> Lru<T> {
 
 pub struct Sources {
     pub fetch: Fetcher,
+    pub map: Option<Arc<crate::map::MapPackage>>,
     elev: Mutex<Lru<ElevTile>>,
     raw: Mutex<Lru<ElevTile>>,
     /// airfields that have been put together (see airports.rs)
@@ -204,12 +205,20 @@ impl Sources {
     }
 
     pub fn with_google(fetch: Fetcher, imagery_url: String, google: Arc<crate::gmaps::Google>) -> Self {
-        Self { fetch, elev: Mutex::new(Lru::new(96)), raw: Mutex::new(Lru::new(160)), fields: Mutex::new(HashMap::new()), vec: Mutex::new(Lru::new(96)), vec_url: Mutex::new(None), imagery_url, google }
+        Self { fetch, map: None, elev: Mutex::new(Lru::new(96)), raw: Mutex::new(Lru::new(160)), fields: Mutex::new(HashMap::new()), vec: Mutex::new(Lru::new(96)), vec_url: Mutex::new(None), imagery_url, google }
+    }
+
+    pub fn with_map(fetch: Fetcher, imagery_url: String, google: Arc<crate::gmaps::Google>, map: Option<Arc<crate::map::MapPackage>>) -> Self {
+        Self { fetch, map, elev: Mutex::new(Lru::new(96)), raw: Mutex::new(Lru::new(160)), fields: Mutex::new(HashMap::new()), vec: Mutex::new(Lru::new(96)), vec_url: Mutex::new(None), imagery_url, google }
     }
 
     /// Satellite image for a tile: Google's when that is on (and has the
     /// tile), the default imagery otherwise.
     pub fn imagery(&self, id: TileId) -> Result<image::RgbaImage> {
+        if let Some(map) = &self.map {
+            let data = map.tile("imagery", id)?;
+            return Ok(image::load_from_memory(&data)?.to_rgba8());
+        }
         if self.google.enabled() && !self.fetch.offline {
             match self.google.tile(&self.fetch.root, id.z, id.x, id.y).and_then(|d| Ok(image::load_from_memory(&d)?.to_rgba8())) {
                 Ok(img) => return Ok(img),
@@ -224,6 +233,46 @@ impl Sources {
     /// Elevation as the data has it.
     pub fn elev_raw(&self, id: TileId) -> Result<Arc<ElevTile>> {
         if let Some(t) = self.raw.lock().get(id) {
+            return Ok(t);
+        }
+        if let Some(map) = &self.map {
+            if id.z != map.data_zoom {
+                let n = 256usize;
+                let mut fine: std::collections::HashMap<TileId, Option<Arc<ElevTile>>> = std::collections::HashMap::new();
+                let mut h = Vec::with_capacity(n * n);
+                for y in 0..n {
+                    for x in 0..n {
+                        let u = (x as f64 + 0.5) / n as f64;
+                        let v = (y as f64 + 0.5) / n as f64;
+                        let (lat, lon) = id.lat_lon(u, v);
+                        let fine_id = TileId::at(lat, lon, map.data_zoom);
+                        let fine = fine.entry(fine_id).or_insert_with(|| {
+                            map.tile("elevation", fine_id).ok()
+                                .and_then(|data| image::load_from_memory(&data).ok())
+                                .map(|image| image.to_rgb8())
+                                .map(|image| {
+                                    let n = image.width() as usize;
+                                    let h = image.pixels().map(|p| p[0] as f32 * 256.0 + p[1] as f32 + p[2] as f32 / 256.0 - 32768.0).collect();
+                                    Arc::new(ElevTile { h, n, pad: 0 })
+                                })
+                        });
+                        let height = fine.as_ref().and_then(|tile| {
+                            let (fu, fv) = fine_id.frac(lat, lon);
+                            Some(tile.sample(fu, fv))
+                        }).unwrap_or(0.0);
+                        h.push(height);
+                    }
+                }
+                let t = Arc::new(ElevTile { h, n, pad: 0 });
+                self.raw.lock().put(id, t.clone());
+                return Ok(t);
+            }
+            let data = map.tile("elevation", id)?;
+            let img = image::load_from_memory(&data)?.to_rgb8();
+            let n = img.width() as usize;
+            let h = img.pixels().map(|p| p[0] as f32 * 256.0 + p[1] as f32 + p[2] as f32 / 256.0 - 32768.0).collect();
+            let t = Arc::new(ElevTile { h, n, pad: 0 });
+            self.raw.lock().put(id, t.clone());
             return Ok(t);
         }
         let url = format!("https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{}/{}/{}.png", id.z, id.x, id.y);
@@ -258,6 +307,9 @@ impl Sources {
     }
 
     fn vector_bytes(&self, id: TileId) -> Result<Vec<u8>> {
+        if let Some(map) = &self.map {
+            return map.tile("vector", id);
+        }
         let key = format!("vec/{}/{}/{}.pbf", id.z, id.x, id.y);
         let data = match std::fs::read(self.fetch.root.join(&key)) {
             Ok(d) if !d.is_empty() => d,

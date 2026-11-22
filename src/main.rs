@@ -53,6 +53,7 @@ mod minimap;
 mod padmap;
 mod padui;
 mod pave;
+mod map;
 mod photonight;
 mod relight;
 mod rain;
@@ -269,6 +270,8 @@ struct MouseScript {
 }
 
 struct Args {
+    /// Standalone fablemap package used instead of streaming Earth data.
+    map: Option<PathBuf>,
     lat: f64,
     lon: f64,
     alt: Option<f64>,
@@ -415,7 +418,7 @@ struct Args {
     mcp_port: u16,
 }
 
-const CLI_USAGE: &str = "fablegame [--version] [--menu | --no-menu] [--menu-screen main|fly|aircraft|settings] [--menu-view LAT,LON,ALT_M] [--hangar mine|download[:FOLDER]] [--place \"city or address\"] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--speed KT] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--rain 0..1] [--rain-at KM,BEARING] [--wet 0..1] [--birds off|low|medium|high] [--flock gull|crow|starling|buzzard|goose,KM[,BEARING[,AGL_M]]] [--snow auto|off|always] [--weather [clear|fair|hazy|overcast|windy|storm]] [--storm-at KM,BEARING[,RADIUS_KM][,shower|thunder|severe|supercell]] [--squall-at KM,BEARING[,LENGTH_KM]] [--strike cg|ic,KM,BEARING@SECONDS] [--flight-menu SECONDS] [--pause-menu flight|places|radio|weather|game|settings[:SECTION]|controls|failures[@SECONDS]] [--settings general|graphics|sound|camera|controls|map] [--airport CODE [--runway 28L] [--approach]] [--aircraft KEY] [--max-zoom 8..19] [--cockpit | --tail-view] [--fov DEG] [--no-vsync] [--no-taa] [--graphics very-low|low|medium|high|ultra] [--storm-quality low|medium|high|ultra] [--render-scale 0.35..2] [--upscaler bilinear|fsr1|fsr3|fsr4] [--fsr4-install] [--headless] [--minimap plan|satellite] [--minimap-up north|heading] [--fps-log] [--bench SECONDS] [--mute] [--lang CODE] [--fuel 0..1] [--cold] [--arcade] [--mcp | --no-mcp] [--mcp-port PORT] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--livery N] [--still] [--boost-at SECONDS] [--stage-at SECONDS] [--engines GROUP] [--ship] [--damage ...]";
+const CLI_USAGE: &str = "fablegame [--version] [--menu | --no-menu] [--menu-screen main|fly|aircraft|settings] [--menu-view LAT,LON,ALT_M] [--hangar mine|download[:FOLDER]] [--place \"city or address\"] [--map MAP_DIR] [--lat D --lon D] [--alt M | --agl M] [--heading DEG] [--speed KT] [--time HOURS] [--time-rate X] [--day 0..364] [--clouds 0..1] [--storms 0..1] [--alto 0..1] [--wind KT,FROM_DEG] [--haze 0.2..40] [--rain 0..1] [--rain-at KM,BEARING] [--wet 0..1] [--birds off|low|medium|high] [--flock gull|crow|starling|buzzard|goose,KM[,BEARING[,AGL_M]]] [--snow auto|off|always] [--weather [clear|fair|hazy|overcast|windy|storm]] [--storm-at KM,BEARING[,RADIUS_KM][,shower|thunder|severe|supercell]] [--squall-at KM,BEARING[,LENGTH_KM]] [--strike cg|ic,KM,BEARING@SECONDS] [--flight-menu SECONDS] [--pause-menu flight|places|radio|weather|game|settings[:SECTION]|controls|failures[@SECONDS]] [--settings general|graphics|sound|camera|controls|map] [--airport CODE [--runway 28L] [--approach]] [--aircraft KEY] [--max-zoom 8..19] [--cockpit | --tail-view] [--fov DEG] [--no-vsync] [--no-taa] [--graphics very-low|low|medium|high|ultra] [--storm-quality low|medium|high|ultra] [--render-scale 0.35..2] [--upscaler bilinear|fsr1|fsr3|fsr4] [--fsr4-install] [--headless] [--minimap plan|satellite] [--minimap-up north|heading] [--fps-log] [--bench SECONDS] [--mute] [--lang CODE] [--fuel 0..1] [--cold] [--arcade] [--mcp | --no-mcp] [--mcp-port PORT] [--offline] [--imagery URL_TEMPLATE] [--google | --no-google] [--photoreal | --no-photoreal] [--photo-detail low|medium|high|ultra] [--no-pave] [--google-key KEY] [--hold SECONDS] [--livery N] [--still] [--boost-at SECONDS] [--stage-at SECONDS] [--engines GROUP] [--ship] [--damage ...]";
 
 fn parse_args() -> Args {
     let v: Vec<String> = std::env::args().skip(1).collect();
@@ -434,6 +437,7 @@ fn parse_args() -> Args {
 
 fn parse_args_from(v: &[String]) -> Result<Args, String> {
     let mut a = Args {
+        map: None,
         lat: 37.8085,
         lon: -122.4650,
         alt: None,
@@ -637,6 +641,11 @@ fn parse_args_from(v: &[String]) -> Result<Args, String> {
                 a.place = Some(req(flag, i)?.to_string());
                 a.pos_set = true;
                 a.menu.get_or_insert(false);
+            }
+            "--map" => {
+                a.map = Some(PathBuf::from(req(flag, i)?));
+                a.offline = true;
+                used = 2;
             }
             "--max-zoom" => a.max_zoom = req_num(flag, i)?.clamp(8.0, 19.0) as u8,
             "--time" => a.hour = req_num(flag, i)?,
@@ -1553,6 +1562,14 @@ impl Game {
             gfx.scale = sc;
         }
         let cache = dirs::cache_dir().unwrap_or_else(|| PathBuf::from(".")).join("fablegame");
+        let map = args.map.as_ref().map(|path| {
+            map::MapPackage::load(path).map(Arc::new).map_err(|e| anyhow::anyhow!("--map {}: {e}", path.display()))
+        }).transpose()?;
+        let mut args_max_zoom = args.max_zoom;
+        if let Some(map) = &map {
+            log::info!("map package: {} ({:.5}, {:.5}, {} km)", map.name, map.center[0], map.center[1], map.radius_km);
+            args_max_zoom = args_max_zoom.min(map.imagery_max_zoom);
+        }
         {
             let prune_dir = cache.clone();
             let _ = std::thread::Builder::new().name("cache-prune".into()).spawn(move || {
@@ -1567,7 +1584,10 @@ impl Game {
         r.load_ground_photos(fetch::Fetcher::new(cache.clone(), args.offline));
         let google_key = args.google_key.clone().or_else(|| std::env::var("FABLE_GOOGLE_KEY").ok().filter(|s| !s.is_empty()));
         let google = Arc::new(gmaps::Google::load(google_key));
-        if let Some(on) = args.google {
+        if map.is_some() {
+            google.set_enabled(false);
+            google.set_photoreal(false);
+        } else if let Some(on) = args.google {
             google.set_enabled(on);
         }
         if let Some(on) = args.photoreal {
@@ -1576,8 +1596,19 @@ impl Game {
         if let Some(d) = args.photo_detail {
             google.set_detail(d);
         }
-        let src = Arc::new(sources::Sources::with_google(fetch::Fetcher::new(cache, args.offline), args.imagery.clone(), google));
+        let src = Arc::new(sources::Sources::with_map(
+            fetch::Fetcher::new(cache, args.offline || map.is_some()),
+            args.imagery.clone(),
+            google,
+            map,
+        ));
         let (mut lat, mut lon, mut status) = (args.lat, args.lon, String::new());
+        if let Some(map) = &src.map {
+            if !args.pos_set && args.place.is_none() && args.airport.is_none() {
+                lat = map.center[0];
+                lon = map.center[1];
+            }
+        }
         if let Some(p) = &args.place {
             match geocode(&src.fetch, p) {
                 Some((la, lo, name)) => {
@@ -1603,7 +1634,7 @@ impl Game {
         if let Some(spec) = &args.damage {
             plane.dmg.apply_spec(spec);
         }
-        let mut world = world::World::new(sources::Loader::new(src.clone(), 14), args.max_zoom);
+        let mut world = world::World::new(sources::Loader::new(src.clone(), 14), args_max_zoom);
         let mut r = r;
         let livery = args.livery.filter(|&n| n < aircraft::liveries(spec).len()).unwrap_or(aircraft::default_livery(spec));
         let lv = aircraft::liveries(spec).get(livery);
@@ -2839,7 +2870,7 @@ impl Game {
         use egui::{Align2, Color32, FontId};
         let screen = ctx.content_rect();
         if self.mouse_captured {
-            let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("cockpit aim dot")));
+            let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("cockpit aim dot")));
             let c = screen.center();
             p.circle_filled(c, 2.5, Color32::from_white_alpha(220));
             p.circle_stroke(c, 6.0, egui::Stroke::new(1.0, Color32::from_black_alpha(180)));
@@ -4490,6 +4521,10 @@ impl Game {
     fn to_globe(&mut self) {
         self.set_pause_menu(false);
         self.info_open = false;
+        if self.src.map.is_some() {
+            self.quit = true;
+            return;
+        }
         let (lat, lon, _) = geo::pos_to_lla(self.plane.pos);
         self.menu.look_at(lat.to_degrees(), lon.to_degrees(), 60_000.0);
         self.menu.pick = Some((lat.to_degrees(), lon.to_degrees()));
@@ -5339,6 +5374,26 @@ impl Game {
                 let n = l.2 as f64;
                 let st = std::mem::take(&mut self.r.stats);
                 log::info!("{:.1} fps avg ({:.1} ms), slowest frame {:.1} ms | game {:.1}  wait-gpu {:.1}  encode {:.1}  submit {:.1} ms", n / el, el / n * 1000.0, l.3 * 1000.0, st[0] / n * 1000.0, st[1] / n * 1000.0, st[2] / n * 1000.0, st[3] / n * 1000.0);
+                if let Some(map) = &self.src.map {
+                    let (lat, lon, alt) = geo::pos_to_lla(self.plane.pos);
+                    let ground = self.world.ground(lat, lon);
+                    let zoom = self.world.ground_zoom(lat, lon);
+                    let (ready, loading, failed) = self.world.loader_diagnostic();
+                    log::info!(
+                        "map {}: lat={:.6} lon={:.6} alt={:.1}m ground={:?} zoom={:?} max={} tiles ready={} loading={} failed={} queued={}",
+                        map.name,
+                        lat.to_degrees(),
+                        lon.to_degrees(),
+                        alt,
+                        ground.map(|g| (g.h, g.water)),
+                        zoom,
+                        self.world.max_zoom,
+                        ready,
+                        loading,
+                        failed,
+                        self.world.queued()
+                    );
+                }
                 (l.1, l.2, l.3) = (now, 0, 0.0);
             }
         }
@@ -8932,5 +8987,9 @@ mod cli_tests {
         assert_eq!(a.lang.map(|lang| lang.code()), Some("ko"));
         assert!(a.weather_panel);
         assert!(!a.mcp);
+        let a = parse_args_from(&s(&["--map", "maps/mini-caucasus", "--airport", "UGKO"])).unwrap();
+        assert_eq!(a.map.as_deref(), Some(std::path::Path::new("maps/mini-caucasus")));
+        assert_eq!(a.airport.as_deref(), Some("UGKO"));
+        assert!(a.offline);
     }
 }

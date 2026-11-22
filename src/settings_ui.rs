@@ -903,9 +903,6 @@ impl Game {
                 ui.end_row();
             }
             // (one grid for both, so the columns line up)
-            for _ in 0..3 {
-                ui.add_space(4.0);
-            }
             ui.end_row();
             for &(id, _) in padmap::actions() {
                 let moved = self.binds.pad.is_moved(id);

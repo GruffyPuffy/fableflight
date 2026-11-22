@@ -16,6 +16,8 @@ const DEFAULT_IMAGERY: &str =
 const VECTOR_TILEJSON: &str = "https://tiles.openfreemap.org/planet";
 const TERRARIUM: &str =
     "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png";
+const COVERAGE_BUFFER_KM: f64 = 10.0;
+const DATA_NEIGHBOR_TILES: i64 = 1;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Manifest {
@@ -163,7 +165,8 @@ fn create(v: &[String]) -> Result<()> {
     fs::create_dir_all(output.join("patches"))?;
     fs::create_dir_all(output.join("overlays"))?;
 
-    let bounds = geographic_bounds(lat, lon, radius);
+    let coverage_radius = radius + COVERAGE_BUFFER_KM;
+    let bounds = geographic_bounds(lat, lon, coverage_radius);
     let mut manifest = match load_manifest(&output) {
         Ok(mut existing) => {
             if (existing.center[0] - lat).abs() > 1e-6 || (existing.center[1] - lon).abs() > 1e-6 {
@@ -244,7 +247,7 @@ fn create(v: &[String]) -> Result<()> {
         manifest.downloaded_bytes = downloaded_manifest_bytes(&manifest.files);
     }
 
-    let elevation_tiles = tiles_for_bounds(bounds, DATA_ZOOM);
+    let elevation_tiles = tiles_for_bounds_with_margin(bounds, DATA_ZOOM, DATA_NEIGHBOR_TILES);
     println!("Elevation z{}: {} tiles", DATA_ZOOM, elevation_tiles.len());
     let mut done = 0usize;
     let mut new_bytes = 0u64;
@@ -428,6 +431,9 @@ fn download_file(agent: &Agent, path: &Path, url: &str) -> Result<(bool, u64)> {
         if !data.is_empty() {
             return Ok((false, data.len() as u64));
         }
+        if path.extension().and_then(|e| e.to_str()) == Some("pbf") {
+            return Ok((false, 0));
+        }
     }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -439,7 +445,8 @@ fn download_file(agent: &Agent, path: &Path, url: &str) -> Result<(bool, u64)> {
     }
     let data = response.body_mut().with_config().limit(64 << 20).read_to_vec()?;
     if data.is_empty() {
-        return Err(anyhow!("empty response"));
+        fs::write(path, &data)?;
+        return Ok((true, 0));
     }
     let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
     fs::write(&tmp, &data)?;
@@ -502,6 +509,24 @@ fn tiles_for_bounds(bounds: [f64; 4], z: u8) -> Vec<(u32, u32)> {
     out
 }
 
+fn tiles_for_bounds_with_margin(bounds: [f64; 4], z: u8, margin: i64) -> Vec<(u32, u32)> {
+    let out = tiles_for_bounds(bounds, z);
+    let size = 1i64 << z;
+    let mut expanded = std::collections::BTreeSet::new();
+    for &(x, y) in &out {
+        for dy in -margin..=margin {
+            for dx in -margin..=margin {
+                let x = (x as i64 + dx).rem_euclid(size);
+                let y = y as i64 + dy;
+                if y >= 0 && y < size {
+                    expanded.insert((x as u32, y as u32));
+                }
+            }
+        }
+    }
+    expanded.into_iter().collect()
+}
+
 fn airport_database_path() -> Result<PathBuf> {
     let candidates = [
         PathBuf::from("assets/airports.tsv.gz"),
@@ -560,5 +585,13 @@ mod tests {
     #[test]
     fn template_replaces_xyz() {
         assert_eq!(template("https://x/{z}/{x}/{y}.jpg", 14, 3, 4), "https://x/14/3/4.jpg");
+    }
+
+    #[test]
+    fn data_tiles_include_neighboring_border() {
+        let bounds = geographic_bounds(42.17745, 42.48535, 60.0);
+        let ordinary = tiles_for_bounds(bounds, DATA_ZOOM);
+        let bordered = tiles_for_bounds_with_margin(bounds, DATA_ZOOM, DATA_NEIGHBOR_TILES);
+        assert!(bordered.len() > ordinary.len());
     }
 }

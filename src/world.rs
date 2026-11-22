@@ -308,6 +308,13 @@ impl World {
         self.wanted.len()
     }
 
+    pub fn loader_diagnostic(&self) -> (usize, usize, usize) {
+        let ready = self.tiles.values().filter(|slot| matches!(slot, Slot::Ready(_))).count();
+        let loading = self.tiles.values().filter(|slot| matches!(slot, Slot::Loading)).count();
+        let failed = self.tiles.values().filter(|slot| matches!(slot, Slot::Failed)).count();
+        (ready, loading, failed)
+    }
+
     /// Height of the ground (or water surface) at a lat/lon: the top of the
     /// photorealistic 3D mesh inside its zone (buildings included), our own
     /// terrain everywhere else.
@@ -976,7 +983,11 @@ impl World {
                             Slot::Ready(Box::new(Tile { center: td.center, radius: td.radius, gpu: r.upload_tile(&td), grid: td.verts[..GV * GV].iter().map(|v| v.pos).collect(), heights: td.heights, wet: td.water.iter().any(|w| *w), water: td.water, sea: td.sea, last_used: self.frame, generation: td.imagery_gen, refreshing: false }))
                         }
                         Err(e) => {
-                            log::debug!("tile {id:?} failed: {e}");
+                            if self.loader.src.map.is_some() {
+                                log::warn!("map tile {id:?} failed: {e}");
+                            } else {
+                                log::debug!("tile {id:?} failed: {e}");
+                            }
                             // A refresh that failed keeps the tile it was replacing.
                             if let Some(Slot::Ready(t)) = self.tiles.get_mut(&id) {
                                 (t.generation, t.refreshing) = (self.loader.src.google.generation(), false);
