@@ -216,8 +216,7 @@ impl Sources {
     /// tile), the default imagery otherwise.
     pub fn imagery(&self, id: TileId) -> Result<image::RgbaImage> {
         if let Some(map) = &self.map {
-            let data = map.tile("imagery", id)?;
-            return Ok(image::load_from_memory(&data)?.to_rgba8());
+            return map.coarse_imagery(id);
         }
         if self.google.enabled() && !self.fetch.offline {
             match self.google.tile(&self.fetch.root, id.z, id.x, id.y).and_then(|d| Ok(image::load_from_memory(&d)?.to_rgba8())) {
@@ -239,28 +238,30 @@ impl Sources {
             if id.z != map.data_zoom {
                 let n = 256usize;
                 let mut fine: std::collections::HashMap<TileId, Option<Arc<ElevTile>>> = std::collections::HashMap::new();
-                let mut h = Vec::with_capacity(n * n);
-                for y in 0..n {
-                    for x in 0..n {
-                        let u = (x as f64 + 0.5) / n as f64;
-                        let v = (y as f64 + 0.5) / n as f64;
-                        let (lat, lon) = id.lat_lon(u, v);
-                        let fine_id = TileId::at(lat, lon, map.data_zoom);
-                        let fine = fine.entry(fine_id).or_insert_with(|| {
-                            map.tile("elevation", fine_id).ok()
-                                .and_then(|data| image::load_from_memory(&data).ok())
-                                .map(|image| image.to_rgb8())
-                                .map(|image| {
-                                    let n = image.width() as usize;
-                                    let h = image.pixels().map(|p| p[0] as f32 * 256.0 + p[1] as f32 + p[2] as f32 / 256.0 - 32768.0).collect();
-                                    Arc::new(ElevTile { h, n, pad: 0 })
-                                })
-                        });
-                        let height = fine.as_ref().and_then(|tile| {
-                            let (fu, fv) = fine_id.frac(lat, lon);
-                            Some(tile.sample(fu, fv))
-                        }).unwrap_or(0.0);
-                        h.push(height);
+                let mut h = vec![0.0; n * n];
+                if let Some([x0, y0, x1, y1]) = map.pixel_range(id, n) {
+                    for y in y0..y1 {
+                        for x in x0..x1 {
+                            let u = (x as f64 + 0.5) / n as f64;
+                            let v = (y as f64 + 0.5) / n as f64;
+                            let (lat, lon) = id.lat_lon(u, v);
+                            let fine_id = TileId::at(lat, lon, map.data_zoom);
+                            let fine = fine.entry(fine_id).or_insert_with(|| {
+                                map.tile("elevation", fine_id).ok()
+                                    .and_then(|data| image::load_from_memory(&data).ok())
+                                    .map(|image| image.to_rgb8())
+                                    .map(|image| {
+                                        let n = image.width() as usize;
+                                        let h = image.pixels().map(|p| p[0] as f32 * 256.0 + p[1] as f32 + p[2] as f32 / 256.0 - 32768.0).collect();
+                                        Arc::new(ElevTile { h, n, pad: 0 })
+                                    })
+                            });
+                            let height = fine.as_ref().and_then(|tile| {
+                                let (fu, fv) = fine_id.frac(lat, lon);
+                                Some(tile.sample(fu, fv))
+                            }).unwrap_or(0.0);
+                            h[y * n + x] = height;
+                        }
                     }
                 }
                 let t = Arc::new(ElevTile { h, n, pad: 0 });
